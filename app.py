@@ -2,21 +2,39 @@ import streamlit as st
 import pandas as pd
 import os
 import random
+import requests
 from datetime import datetime
 
 # --- Configuration ---
 MAT_DIR, RAW_DIR = "MAT", "RAW"
-USERS_CSV, LOGS_CSV, RESULTS_CSV = "users.csv", "image_logs.csv", "results.csv"
 MAX_QUESTIONS = 20
 
-# Initialize CSVs
-for file, cols in [
-    (USERS_CSV, ["Email", "Name", "IT_Field", "Analytics_Knowledge", "Timestamp"]),
-    (LOGS_CSV, ["Email", "MAT_Image", "RAW_Image", "Timestamp"]),
-    (RESULTS_CSV, ["Email", "MAT_Image", "RAW_Image", "Selected_Harder", "Timestamp"])
-]:
-    if not os.path.exists(file):
-        pd.DataFrame(columns=cols).to_csv(file, index=False)
+# ⚠️ REPLACE THIS WITH YOUR DEPLOYED GOOGLE APPS SCRIPT WEB APP URL ⚠️
+WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxhDQRUbSqm__le5o0c4UawSPU1bVRZvICpxOtUTmLPLTah1UEB9Hk58QNyklWInpJC/exec" 
+
+# --- Backend Connectivity ---
+def fetch_sheet_data(sheet_name):
+    """Fetches data from the Google Sheet via the Web App."""
+    if WEB_APP_URL == "PASTE_YOUR_WEB_APP_URL_HERE":
+        return pd.DataFrame()
+    try:
+        response = requests.get(f"{WEB_APP_URL}?sheet={sheet_name}")
+        data = response.json()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+def append_to_sheet(sheet_name, row_data):
+    """Appends a row to the Google Sheet via the Web App."""
+    if WEB_APP_URL == "PASTE_YOUR_WEB_APP_URL_HERE":
+        st.warning("Please configure your WEB_APP_URL to save data!")
+        return
+    try:
+        payload = {"sheetName": sheet_name, "rowData": row_data}
+        requests.post(WEB_APP_URL, json=payload)
+    except Exception as e:
+        st.error(f"Error saving data: {e}")
 
 # --- Session State ---
 if 'email' not in st.session_state:
@@ -28,10 +46,14 @@ if 'current_pair' not in st.session_state:
 
 def get_unique_pair(email):
     """Fetches images the user hasn't seen yet."""
-    logs_df = pd.read_csv(LOGS_CSV)
-    seen_mat = logs_df[logs_df["Email"] == email]["MAT_Image"].tolist()
-    seen_raw = logs_df[logs_df["Email"] == email]["RAW_Image"].tolist()
+    logs_df = fetch_sheet_data("image_logs")
     
+    if logs_df.empty or "Email" not in logs_df.columns:
+        seen_mat, seen_raw = [], []
+    else:
+        seen_mat = logs_df[logs_df["Email"] == email]["MAT_Image"].tolist()
+        seen_raw = logs_df[logs_df["Email"] == email]["RAW_Image"].tolist()
+        
     mat_imgs = [f for f in os.listdir(MAT_DIR) if f not in seen_mat and f.endswith(('.png', '.jpg'))]
     raw_imgs = [f for f in os.listdir(RAW_DIR) if f not in seen_raw and f.endswith(('.png', '.jpg'))]
     
@@ -41,10 +63,10 @@ def get_unique_pair(email):
     pair = {"mat": random.choice(mat_imgs), "raw": random.choice(raw_imgs), "mat_left": random.choice([True, False])}
     
     # Log that these images were shown
-    pd.DataFrame([{
+    append_to_sheet("image_logs", {
         "Email": email, "MAT_Image": pair["mat"], "RAW_Image": pair["raw"], 
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }]).to_csv(LOGS_CSV, mode='a', header=False, index=False)
+    })
     
     return pair
 
@@ -59,16 +81,20 @@ if st.session_state.email is None:
         
         if st.form_submit_button("Start Survey") and email:
             # Check if user already exists, if not, save them
-            users_df = pd.read_csv(USERS_CSV)
-            if email not in users_df["Email"].values:
-                pd.DataFrame([{
+            users_df = fetch_sheet_data("users")
+            if users_df.empty or "Email" not in users_df.columns or email not in users_df["Email"].values:
+                append_to_sheet("users", {
                     "Email": email, "Name": name, "IT_Field": it_field, 
                     "Analytics_Knowledge": knowledge, "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }]).to_csv(USERS_CSV, mode='a', header=False, index=False)
+                })
             
             # Count how many questions they've already answered (in case they return)
-            results_df = pd.read_csv(RESULTS_CSV)
-            st.session_state.q_count = len(results_df[results_df["Email"] == email])
+            results_df = fetch_sheet_data("results")
+            if not results_df.empty and "Email" in results_df.columns:
+                st.session_state.q_count = len(results_df[results_df["Email"] == email])
+            else:
+                st.session_state.q_count = 0
+                
             st.session_state.email = email
             st.session_state.current_pair = get_unique_pair(email)
             st.rerun()
@@ -89,10 +115,10 @@ else:
         
         col1, col2 = st.columns(2)
         def save_result(selection):
-            pd.DataFrame([{
+            append_to_sheet("results", {
                 "Email": st.session_state.email, "MAT_Image": pair["mat"], "RAW_Image": pair["raw"],
                 "Selected_Harder": selection, "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }]).to_csv(RESULTS_CSV, mode='a', header=False, index=False)
+            })
             st.session_state.q_count += 1
             st.session_state.current_pair = get_unique_pair(st.session_state.email) if st.session_state.q_count < MAX_QUESTIONS else None
         
@@ -116,7 +142,4 @@ with st.expander("🛠️"): # Obscure emoji for admin access
     
     if ad_user == "admin" and ad_pass == "admin":
         st.success("Admin unlocked.")
-        for file in [USERS_CSV, LOGS_CSV, RESULTS_CSV]:
-            if os.path.exists(file):
-                with open(file, "r") as f:
-                    st.download_button(f"Download {file}", f, file_name=file)
+        st.markdown("[Open Google Sheet Data](https://docs.google.com/spreadsheets/d/1jwvK2PwaTHL226HZna471dhS79GYNYvzC1GxquGaiZ4/edit?usp=sharing)")
