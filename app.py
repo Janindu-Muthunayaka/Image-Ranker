@@ -7,7 +7,7 @@ from datetime import datetime
 # --- Configuration ---
 MAT_DIR, RAW_DIR = "MAT", "RAW"
 USERS_CSV, LOGS_CSV, RESULTS_CSV = "users.csv", "image_logs.csv", "results.csv"
-MAX_QUESTIONS = 10
+MAX_QUESTIONS = 20
 
 # Initialize CSVs
 for file, cols in [
