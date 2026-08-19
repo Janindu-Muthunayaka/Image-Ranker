@@ -3,6 +3,7 @@ import pandas as pd
 import os
 import random
 import requests
+import threading
 from datetime import datetime
 
 # --- Configuration ---
@@ -13,28 +14,26 @@ MAX_QUESTIONS = 20
 WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxhDQRUbSqm__le5o0c4UawSPU1bVRZvICpxOtUTmLPLTah1UEB9Hk58QNyklWInpJC/exec" 
 
 # --- Backend Connectivity ---
+@st.cache_data(ttl=600)
 def fetch_sheet_data(sheet_name):
-    """Fetches data from the Google Sheet via the Web App."""
-    if WEB_APP_URL == "PASTE_YOUR_WEB_APP_URL_HERE":
-        return pd.DataFrame()
+    """Fetches data from the Google Sheet via the Web App. Cached to avoid redundant slow requests."""
     try:
         response = requests.get(f"{WEB_APP_URL}?sheet={sheet_name}")
         data = response.json()
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
         return pd.DataFrame()
 
-def append_to_sheet(sheet_name, row_data):
-    """Appends a row to the Google Sheet via the Web App."""
-    if WEB_APP_URL == "PASTE_YOUR_WEB_APP_URL_HERE":
-        st.warning("Please configure your WEB_APP_URL to save data!")
-        return
+def _post_data(payload):
     try:
-        payload = {"sheetName": sheet_name, "rowData": row_data}
         requests.post(WEB_APP_URL, json=payload)
-    except Exception as e:
-        st.error(f"Error saving data: {e}")
+    except Exception:
+        pass
+
+def append_to_sheet_async(sheet_name, row_data):
+    """Appends a row to the Google Sheet asynchronously to avoid blocking the UI."""
+    payload = {"sheetName": sheet_name, "rowData": row_data}
+    threading.Thread(target=_post_data, args=(payload,)).start()
 
 # --- Session State ---
 if 'email' not in st.session_state:
@@ -43,16 +42,15 @@ if 'q_count' not in st.session_state:
     st.session_state.q_count = 0
 if 'current_pair' not in st.session_state:
     st.session_state.current_pair = None
+if 'seen_mat' not in st.session_state:
+    st.session_state.seen_mat = []
+if 'seen_raw' not in st.session_state:
+    st.session_state.seen_raw = []
 
-def get_unique_pair(email):
-    """Fetches images the user hasn't seen yet."""
-    logs_df = fetch_sheet_data("image_logs")
-    
-    if logs_df.empty or "Email" not in logs_df.columns:
-        seen_mat, seen_raw = [], []
-    else:
-        seen_mat = logs_df[logs_df["Email"] == email]["MAT_Image"].tolist()
-        seen_raw = logs_df[logs_df["Email"] == email]["RAW_Image"].tolist()
+def get_unique_pair():
+    """Fetches images the user hasn't seen yet using in-memory session state."""
+    seen_mat = st.session_state.seen_mat
+    seen_raw = st.session_state.seen_raw
         
     mat_imgs = [f for f in os.listdir(MAT_DIR) if f not in seen_mat and f.endswith(('.png', '.jpg'))]
     raw_imgs = [f for f in os.listdir(RAW_DIR) if f not in seen_raw and f.endswith(('.png', '.jpg'))]
@@ -62,9 +60,12 @@ def get_unique_pair(email):
         
     pair = {"mat": random.choice(mat_imgs), "raw": random.choice(raw_imgs), "mat_left": random.choice([True, False])}
     
-    # Log that these images were shown
-    append_to_sheet("image_logs", {
-        "Email": email, "MAT_Image": pair["mat"], "RAW_Image": pair["raw"], 
+    st.session_state.seen_mat.append(pair["mat"])
+    st.session_state.seen_raw.append(pair["raw"])
+    
+    # Log that these images were shown asynchronously
+    append_to_sheet_async("image_logs", {
+        "Email": st.session_state.email, "MAT_Image": pair["mat"], "RAW_Image": pair["raw"], 
         "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     })
     
@@ -83,20 +84,26 @@ if st.session_state.email is None:
             # Check if user already exists, if not, save them
             users_df = fetch_sheet_data("users")
             if users_df.empty or "Email" not in users_df.columns or email not in users_df["Email"].values:
-                append_to_sheet("users", {
+                append_to_sheet_async("users", {
                     "Email": email, "Name": name, "IT_Field": it_field, 
                     "Analytics_Knowledge": knowledge, "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 })
             
-            # Count how many questions they've already answered (in case they return)
+            # Count how many questions they've already answered
             results_df = fetch_sheet_data("results")
             if not results_df.empty and "Email" in results_df.columns:
                 st.session_state.q_count = len(results_df[results_df["Email"] == email])
             else:
                 st.session_state.q_count = 0
                 
+            # Populate seen images from DB once on login
+            logs_df = fetch_sheet_data("image_logs")
+            if not logs_df.empty and "Email" in logs_df.columns:
+                st.session_state.seen_mat = logs_df[logs_df["Email"] == email]["MAT_Image"].tolist()
+                st.session_state.seen_raw = logs_df[logs_df["Email"] == email]["RAW_Image"].tolist()
+                
             st.session_state.email = email
-            st.session_state.current_pair = get_unique_pair(email)
+            st.session_state.current_pair = get_unique_pair()
             st.rerun()
 
 # --- UI: Survey Interface ---
@@ -115,12 +122,12 @@ else:
         
         col1, col2 = st.columns(2)
         def save_result(selection):
-            append_to_sheet("results", {
+            append_to_sheet_async("results", {
                 "Email": st.session_state.email, "MAT_Image": pair["mat"], "RAW_Image": pair["raw"],
                 "Selected_Harder": selection, "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             })
             st.session_state.q_count += 1
-            st.session_state.current_pair = get_unique_pair(st.session_state.email) if st.session_state.q_count < MAX_QUESTIONS else None
+            st.session_state.current_pair = get_unique_pair() if st.session_state.q_count < MAX_QUESTIONS else None
         
         with col1:
             st.image(left_img, use_container_width=True)
